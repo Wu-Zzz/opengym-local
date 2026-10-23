@@ -14,8 +14,12 @@ on:
     - cron: '17 2 * * 1'
   workflow_dispatch:
     inputs:
+      update_upstream:
+        description: Check and merge eligible upstream changes
+        type: boolean
+        default: true
       verify_current:
-        description: Also test and publish when upstream has no new commits
+        description: Test and publish the current fork even without an upstream merge
         type: boolean
         default: false
 
@@ -56,6 +60,7 @@ jobs:
         run: node scripts/maintenance/cloud-update.mjs prepare
         env:
           EVENT_NAME: ${{ github.event_name }}
+          UPDATE_UPSTREAM: ${{ inputs.update_upstream }}
           VERIFY_CURRENT: ${{ inputs.verify_current }}
       - uses: actions/upload-artifact@v7
         with:
@@ -121,11 +126,20 @@ jobs:
         run: |
           npm --prefix scripts/maintenance ci
           npm --prefix scripts/maintenance exec -- playwright install --with-deps chromium webkit
-      - name: Old data, backups, browser isolation, offline, upgrade and rollback
+      - name: Chromium old data, backups, isolation, offline, upgrade and rollback
         env:
+          UPGRADE_BROWSERS: chromium
           BASELINE_DIST: ${{ runner.temp }}/opengym-baseline/frontend/dist
           CANDIDATE_DIST: ${{ github.workspace }}/frontend/dist
-          UPGRADE_REPORT: ${{ runner.temp }}/upgrade-results/report.json
+          UPGRADE_REPORT: ${{ runner.temp }}/upgrade-results/chromium.json
+          UPGRADE_ARTIFACT_DIR: ${{ runner.temp }}/upgrade-results
+        run: npm --prefix scripts/maintenance run test:upgrade
+      - name: WebKit old data, backups, isolation, offline, upgrade and rollback
+        env:
+          UPGRADE_BROWSERS: webkit
+          BASELINE_DIST: ${{ runner.temp }}/opengym-baseline/frontend/dist
+          CANDIDATE_DIST: ${{ github.workspace }}/frontend/dist
+          UPGRADE_REPORT: ${{ runner.temp }}/upgrade-results/webkit.json
           UPGRADE_ARTIFACT_DIR: ${{ runner.temp }}/upgrade-results
         run: npm --prefix scripts/maintenance run test:upgrade
       - name: Keep the browser verification result

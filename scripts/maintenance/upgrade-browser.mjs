@@ -340,7 +340,8 @@ async function run(name, builds) {
     await assertMedia(pa, true); await assertMedia(pb, false)
     await checkExports(pa, old.state, `${name}-offline`)
     result.checks.push('offline app reload and real backup exports after upgrade')
-    await a.setOffline(false); await b.setOffline(false); offline = false
+    offline = false
+    await a.setOffline(false); await b.setOffline(false)
 
     step(name, 'importing old and upgraded backups into fresh browser contexts')
     await checkImport(name, old.json.path, fixture('a'), false)

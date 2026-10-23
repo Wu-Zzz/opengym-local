@@ -55,7 +55,8 @@ function requireSafe(before, after) {
 
 export async function prepare({ site = SITE, upstreamURL = 'https://github.com/DuarteSantos8/openGym.git', initial = INITIAL } = {}) {
   mkdirSync('maintenance-transfer', { recursive: true })
-  const checkUpstream = process.env.EVENT_NAME !== 'push'
+  const checkUpstream = process.env.EVENT_NAME !== 'push' &&
+    !(process.env.EVENT_NAME === 'workflow_dispatch' && process.env.UPDATE_UPSTREAM === 'false')
   if (checkUpstream && existsSync('.github/maintenance-paused.json')) throw new Error('Automatic updates are paused after a failed release; review and remove the pause record first')
   const base = sha(git('rev-parse', 'HEAD'))
   const response = await fetch(site + 'release.json?check=' + Date.now(), { signal: AbortSignal.timeout(30000), cache: 'no-store' })
@@ -98,7 +99,9 @@ export async function prepare({ site = SITE, upstreamURL = 'https://github.com/D
   const metadata = { base, baseline, candidate, upstream, update, verify, site: SITE }
   writeFileSync('maintenance-transfer/release.json', JSON.stringify(metadata, null, 2) + '\n')
   for (const [key, value] of Object.entries(metadata)) output(key, value)
-  summary(update ? `Candidate ${candidate} prepared from upstream ${upstream}. No production change yet.` : 'No new upstream commits. ' + (verify ? 'Verifying the current release.' : 'Live site unchanged.'))
+  summary(update ? `Candidate ${candidate} prepared from upstream ${upstream}. No production change yet.` :
+    (checkUpstream ? 'No new upstream commits. ' : 'Upstream merging was not requested. ') +
+    (verify ? 'Verifying the current fork.' : 'Live site unchanged.'))
 }
 
 export async function promote() {

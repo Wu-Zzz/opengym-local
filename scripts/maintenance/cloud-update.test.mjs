@@ -37,6 +37,7 @@ beforeEach(() => {
   git('-C', repo, 'remote', 'set-url', 'origin', origin)
   process.chdir(repo)
   process.env.EVENT_NAME = 'schedule'
+  delete process.env.UPDATE_UPSTREAM
   delete process.env.VERIFY_CURRENT
   delete process.env.GITHUB_OUTPUT
   delete process.env.GITHUB_STEP_SUMMARY
@@ -99,6 +100,18 @@ test('human push deploys its own revision without merging unrelated sensitive up
   assert.equal(metadata().candidate, base)
   assert.equal(metadata().update, false)
   assert.equal(metadata().verify, true)
+})
+
+test('explicit current-fork verification does not bypass the gate by merging protected upstream changes', async () => {
+  commit(upstream, 'frontend/src/store/persistence.js', 'localStorage.clear()\n', 'Change storage')
+  process.env.EVENT_NAME = 'workflow_dispatch'
+  process.env.UPDATE_UPSTREAM = 'false'
+  process.env.VERIFY_CURRENT = 'true'
+  await runPrepare()
+  assert.equal(metadata().candidate, base)
+  assert.equal(metadata().update, false)
+  assert.equal(metadata().verify, true)
+  assert.equal(main(), base)
 })
 
 test('a merge conflict leaves remote main and the production baseline intact', async () => {
