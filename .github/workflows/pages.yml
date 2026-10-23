@@ -96,6 +96,8 @@ jobs:
           BASELINE: ${{ needs.prepare.outputs.baseline }}
           HAS_UPDATE: ${{ needs.prepare.outputs.update }}
         run: |
+          # The container owns a runner-mounted checkout; trust only this exact workspace.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           if [ "$HAS_UPDATE" = true ]; then
             git fetch "$GITHUB_WORKSPACE/maintenance-transfer/candidate.bundle" HEAD
             test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE"
