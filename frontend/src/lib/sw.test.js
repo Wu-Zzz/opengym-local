@@ -195,6 +195,7 @@ describe('sw.js re-registers a rotated push subscription with the page\'s device
   it('sends the device id the page left', async () => {
     await loadSW()
     await (await globalThis.caches.open(DEVICE_CACHE)).put(DEVICE_URL, new Response('dev1234abcd'))
+    await (await globalThis.caches.open('another-site-v1')).put('/other/', new Response('keep me'))
     expect(await rotate()).toEqual([['api/push/subscribe', {
       subscription: { endpoint: 'https://push.example/e2', keys: { p256dh: 'p2', auth: 'a2' } },
       deviceId: 'dev1234abcd'
@@ -208,16 +209,17 @@ describe('sw.js re-registers a rotated push subscription with the page\'s device
     expect(sent[0][1]).toEqual({ subscription: { endpoint: 'https://push.example/e2', keys: { p256dh: 'p2', auth: 'a2' } } })
   })
 
-  it('a new build\'s activate sweeps the old build\'s cache and keeps the device id', async () => {
+  it('a new build\'s activate keeps other sites caches and the device id', async () => {
     await loadSW()
     await previousBuild()
     await (await globalThis.caches.open(DEVICE_CACHE)).put(DEVICE_URL, new Response('dev1234abcd'))
+    await (await globalThis.caches.open('another-site-v1')).put('/other/', new Response('keep me'))
     globalThis.fetch = async u => (String(u) === 'index.html'
       ? { ok: true, status: 200, redirected: false, text: async () => shellHtml }
       : { ok: true, status: 200, clone: () => ({}) })
     await fire('install')
     await fire('activate')
-    expect((await globalThis.caches.keys()).sort()).toEqual([CACHE, DEVICE_CACHE].sort())
+    expect((await globalThis.caches.keys()).sort()).toEqual([CACHE, DEVICE_CACHE, 'another-site-v1'].sort())
     expect(await (await (await globalThis.caches.open(DEVICE_CACHE)).match(DEVICE_URL)).text()).toBe('dev1234abcd')
   })
 })

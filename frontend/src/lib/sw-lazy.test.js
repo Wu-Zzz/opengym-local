@@ -75,10 +75,18 @@ describe('the worker keeps the on-demand code too', () => {
 
   it('the build stamps the worker with both', () => {
     const vite = readFileSync(fileURLToPath(new URL('../../vite.config.js', import.meta.url)), 'utf8')
-    expect(vite).toMatch(/generateBundle\(_, bundle\) \{ lazy = lazyAssets\(bundle\) \}/)
     expect(vite).toMatch(/stampSw\(readFileSync\(sw, 'utf8'\), \{ stamp, lazy \}\)/)
     const sw = stampSw(source, { stamp: 'abc', lazy: ["./assets/it's.js"] })
     expect(sw).toContain("const CACHE = 'opengym-rt-abc'")
     expect(sw).not.toContain('__LAZY__')
+  })
+
+  it('keeps the chosen local site languages ready on the first offline launch', () => {
+    const bundle = Object.fromEntries(['locales/zh', 'instr/zh', 'exercise-names/zh', 'locales/zh-TW', 'locales/fr'].map((name, i) => [
+      `assets/pack-${i}.js`, { type: 'chunk', moduleIds: ['/app/frontend/src/' + name + '.js'] },
+    ]))
+    expect(lazyAssets(bundle, { languages: ['zh', 'zh-TW'] })).toEqual([
+      './assets/pack-0.js', './assets/pack-1.js', './assets/pack-2.js', './assets/pack-3.js',
+    ])
   })
 })

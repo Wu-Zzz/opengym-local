@@ -67,12 +67,12 @@ const swStamp = {
   name: 'opengym-sw-stamp',
   apply: 'build',
   configResolved(config) { outDir = resolve(config.root, config.build.outDir) },
-  generateBundle(_, bundle) { lazy = lazyAssets(bundle) },
+  generateBundle(_, bundle) { lazy = lazyAssets(bundle, { languages: process.env.VITE_LOCAL === '1' ? ['zh', 'zh-TW'] : [] }) },
   closeBundle() {
     const html = join(outDir, 'index.html'), sw = join(outDir, 'sw.js')
     if (!existsSync(html) || !existsSync(sw)) return
     const stamp = createHash('sha256').update(readFileSync(html)).digest('hex').slice(0, 10)
-    writeFileSync(sw, stampSw(readFileSync(sw, 'utf8'), { stamp, lazy }))
+    writeFileSync(sw, stampSw(readFileSync(sw, 'utf8'), { stamp, lazy }).replace('__LOCAL_ONLY__', process.env.VITE_LOCAL === '1' ? '1' : '0'))
   }
 }
 

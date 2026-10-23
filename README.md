@@ -1,3 +1,32 @@
+# openGym 手机本地版
+
+**使用网址：https://wu-zzz.github.io/opengym-local/**
+
+基于 [DuarteSantos8/openGym](https://github.com/DuarteSantos8/openGym) 的非商业个人部署。
+原项目功能、署名和许可证保留；此版本默认中文，不需要账号，不连接训练数据服务器，不填充演示记录。
+
+- iPhone：用 Safari 打开网址，分享 → 添加到主屏幕。
+- 安卓：用 Chrome 打开网址，菜单 → 添加到主屏幕/安装应用。
+- 同一个网址可以分享给朋友；每个人的记录只保存在各自的浏览器中，不会互相看到。
+- 同一台设备、同一个浏览器仅有一份本地记录；不同浏览器和设备不会自动同步。
+- 设置 → 数据与备份 → 导出备份。换手机先导出，再在新手机导入；有照片/视频时选 ZIP 备份。
+- 清除网站数据、无痕模式、浏览器回收存储可能使本地记录丢失，请定期备份。
+- 首次打开和加载尚未缓存的动作媒体需要网络。主屏幕版本会预取计划内动作；其余媒体按需缓存。
+- 网页保持打开时可使用组间计时。关闭网页后的系统推送、云端 AI 教练与跨设备账号同步未启用。
+
+## 维护与费用
+
+GitHub Pages 免费公开仓库托管，使用免费 github.io 地址；没有购买服务器、域名或数据库。
+训练数据不上传；托管商仍会接收正常的网页/图片下载请求。
+
+本地构建：`cd frontend && npm ci && npm run build:local`。
+主分支推送后，唯一启用的 Pages 工作流运行本地模式测试、构建、打包动作媒体并发布。
+测试和实现见 `frontend/src/lib/local-mode.js`、`frontend/src/store/useStore.local-only.test.js`。
+
+以下为上游项目文档，其中账号、服务器、手机原生版等说明不代表此部署启用了相应服务。
+
+---
+
 <div align="center">
 
 <img src="assets/banner.png" alt="openGym" width="720">

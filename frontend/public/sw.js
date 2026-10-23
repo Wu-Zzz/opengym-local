@@ -5,6 +5,7 @@
    every deploy is a new worker with its own cache and the previous build's files are dropped on
    activate; the media cache (`MEDIA`) is kept across builds. */
 const CACHE = 'opengym-rt-__BUILD__'
+const LOCAL_ONLY = '__LOCAL_ONLY__' === '1'
 // Where the page leaves this browser's push device id (lib/push.js shareDeviceId) for the
 // pushsubscriptionchange handler below, which has no localStorage to read it from. Not a build
 // cache, so activate's sweep leaves it alone.
@@ -100,7 +101,7 @@ self.addEventListener('activate', e => {
     if (await c.match('index.html')) {
       // DEVICE_CACHE holds this browser's device id (the push re-register below needs it): not a
       // build, so an update never sweeps it.
-      const old = (await caches.keys()).filter(k => k !== CACHE && k !== MEDIA && k !== DEVICE_CACHE)
+      const old = (await caches.keys()).filter(k => k.startsWith('opengym-rt-') && k !== CACHE)
       // A build from before MEDIA existed kept its media in its own cache: move it across first,
       // so the first update to this worker does not cost what the device already had offline.
       await Promise.all(old.map(k => adoptMedia(k).catch(() => {})))
@@ -232,6 +233,7 @@ self.addEventListener('notificationclick', e => {
 // device id the page registers with: without one, this browser's rest-timer alert goes to every
 // device of the account until the page's next boot sync sees the missing id and sends it again.
 self.addEventListener('pushsubscriptionchange', e => {
+  if (LOCAL_ONLY) return
   e.waitUntil((async () => {
     const old = e.oldSubscription || (await self.registration.pushManager.getSubscription())
     const key = e.newSubscription?.options?.applicationServerKey || old?.options?.applicationServerKey
