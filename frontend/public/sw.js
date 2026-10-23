@@ -6,6 +6,61 @@
    activate; the media cache (`MEDIA`) is kept across builds. */
 const CACHE = 'opengym-rt-__BUILD__'
 const LOCAL_ONLY = '__LOCAL_ONLY__' === '1'
+// Before the new app opens its store, every other scoped window must understand dayPhotos.
+// An old document keeps running untouched, but it cannot answer this capability challenge.
+const capabilityReplies = new Map()
+let capabilityNonce = 0
+const inLocalScope = client => {
+  try {
+    const url = new URL(client.url), scope = new URL(self.registration.scope)
+    return client.type === 'window' && url.origin === scope.origin && url.pathname.startsWith(scope.pathname)
+  } catch { return false }
+}
+const localWindows = async () => (await self.clients.matchAll({ type: 'window', includeUncontrolled: true })).filter(inLocalScope)
+function understandsMedia(client) {
+  return new Promise(resolve => {
+    const nonce = `${Date.now()}-${++capabilityNonce}`
+    const finish = ok => { clearTimeout(timer); capabilityReplies.delete(nonce); resolve(ok) }
+    const timer = setTimeout(async () => {
+      // A window closed while we waited is no longer a writer. A hidden, suspended or
+      // unresponsive window still exists and must never be mistaken for a closed one.
+      try { const live = await self.clients.get(client.id); finish(!live || !inLocalScope(live)) }
+      catch { finish(false) }
+    }, 1800)
+    capabilityReplies.set(nonce, { id: client.id, finish })
+    try { client.postMessage({ type: 'opengym:local-capability', nonce }) } catch { finish(false) }
+  })
+}
+async function checkLocalWindows(source) {
+  if (!inLocalScope(source)) return false
+  const checked = new Set()
+  // Re-enumerate after responses: a new/slow-loading old document cannot slip between the
+  // first list and the answer. Churn that never settles fails closed and can be retried.
+  for (let round = 0; round < 4; round++) {
+    const clients = await localWindows()
+    const pending = clients.filter(client => !checked.has(client.id))
+    if (!pending.length) return clients.some(client => client.id === source.id)
+    const replies = await Promise.all(pending.map(understandsMedia))
+    if (replies.some(ok => !ok)) return false
+    for (const client of pending) checked.add(client.id)
+  }
+  return false
+}
+self.addEventListener('message', event => {
+  if (!LOCAL_ONLY) return
+  const data = event.data
+  if (data?.type === 'opengym:local-capability-reply') {
+    const waiting = capabilityReplies.get(data.nonce)
+    if (waiting && event.source?.id === waiting.id) waiting.finish(data.mediaRefsDayPhotos === 1)
+    return
+  }
+  if (data?.type !== 'opengym:local-check' || !event.ports?.[0]) return
+  event.waitUntil(checkLocalWindows(event.source).then(ok => {
+    event.ports[0].postMessage({ type: 'opengym:local-check', mediaRefsDayPhotos: 1, ok, reason: ok ? null : 'old-pages' })
+  }).catch(() => {
+    event.ports[0].postMessage({ type: 'opengym:local-check', mediaRefsDayPhotos: 1, ok: false, reason: 'unavailable' })
+  }))
+})
 // Where the page leaves this browser's push device id (lib/push.js shareDeviceId) for the
 // pushsubscriptionchange handler below, which has no localStorage to read it from. Not a build
 // cache, so activate's sweep leaves it alone.
@@ -54,7 +109,16 @@ async function precache() {
   // Throwing fails the install, which is the only thing that keeps the build already
   // on this device, and its cache, in place; a returned-quietly install activates and sweeps.
   if (!res.ok || res.redirected) throw new Error('precache: index.html ' + res.status + (res.redirected ? ' redirected' : ''))
-  const html = await res.text()
+  let html
+  if (LOCAL_ONLY) {
+    // The worker and HTML can cross during a deployment or CDN cache refresh. Never put
+    // another build's document under this worker's trusted cache name.
+    const bytes = await res.arrayBuffer()
+    const digest = await crypto.subtle.digest('SHA-256', bytes)
+    const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('').slice(0, 10)
+    if (hash !== CACHE.slice('opengym-rt-'.length)) throw new Error('precache: local build HTML mismatch')
+    html = new TextDecoder().decode(bytes)
+  } else html = await res.text()
   const refs = [...new Set([...html.matchAll(/(?:src|href)="([^"]+)"/g)].map(m => m[1])
     .filter(u => /\.(?:js|css|png|svg|webmanifest|json)(?:\?|$)/.test(u) && !/^(?:https?:)?\/\//.test(u)))]
   // The scripts and the stylesheets ARE the app. Every sub-resource used to be best-effort, so an
@@ -75,13 +139,13 @@ async function precache() {
     await c.put(u, r)
   }))
   await Promise.all(refs.filter(u => !code.includes(u)).map(u => c.add(u).catch(() => {})))
-  // Best effort, like the icons: a chunk missing here is fetched when it is needed, as before, and
-  // must not keep a working build from installing. Fetched by hand for the same redirect reason.
+  // The entry now imports App dynamically after the local safety check (or immediately for
+  // server builds). Its lazy code is part of the offline shell, so a missed chunk must keep
+  // the previous working build in place instead of activating an incomplete one.
   await Promise.all(lazyAssets().filter(u => !code.includes(u)).map(async u => {
-    try {
-      const r = await fetch(u, { cache: 'no-cache' })
-      if (r.ok && !r.redirected) await c.put(u, r)
-    } catch { /* fetched on demand instead */ }
+    const r = await fetch(u, { cache: 'no-cache' })
+    if (!r.ok || r.redirected) throw new Error('precache: ' + u + ' ' + r.status + (r.redirected ? ' redirected' : ''))
+    await c.put(u, r)
   }))
   // The shell goes in last, so activate's guard — an index.html in THIS build's cache — means the
   // whole shell is there rather than just its first file.
@@ -258,6 +322,17 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url)
   if (e.request.method !== 'GET' || url.origin !== location.origin) return
   if (url.pathname.startsWith('/api/') || url.pathname.startsWith(API)) return    // never cache auth/data
+  // A controlled page can navigate to another app on this origin. Leave that destination
+  // alone instead of returning our shell at a URL outside this registration's scope.
+  if (LOCAL_ONLY && e.request.mode === 'navigate' && !url.pathname.startsWith(new URL(self.registration.scope).pathname)) return
+
+  // A local document and its worker must come from the same checked build. New releases
+  // enter through install/precache; network-first navigation could otherwise revive an old
+  // HTTP-cached document after the compatibility check had already admitted new writers.
+  if (LOCAL_ONLY && (e.request.mode === 'navigate' || url.pathname === new URL('index.html', self.registration.scope).pathname)) {
+    e.respondWith(caches.open(CACHE).then(c => c.match('index.html')).then(hit => hit || new Response('openGym 暂时无法打开，请联网后重试。', { status: 503, headers: { 'content-type': 'text/plain; charset=utf-8' } })))
+    return
+  }
 
   if (isMediaPath(url.pathname)) {
     e.respondWith(media(e))

@@ -84,6 +84,20 @@ describe('referencedHashes', () => {
     const S = { customEx: [{ id: 'x', media: ref({ poster: { hash: A, mime: 'image/webp', size: 1000, width: 400, height: 300 } }) }] }
     expect(referencedFiles(S).map(f => f.hash)).toEqual([A])
   })
+
+  it('keeps newer day-only photos and their posters when this older build is restored', () => {
+    const S = { workouts: [], customEx: [], dayPhotos: {
+      [A]: { d: '2026-10-23', m: ref(), _ts: 100 },
+      deleted: { _ts: 200 }, malformed: null,
+    } }
+    const before = JSON.stringify(S)
+    expect([...referencedHashes(S)].sort()).toEqual([A, B])
+    expect(referencedFiles(S)).toEqual([
+      { hash: B, mime: 'image/webp', size: 100, poster: true },
+      { hash: A, mime: 'image/webp', size: 1000, poster: false },
+    ])
+    expect(JSON.stringify(S)).toBe(before)
+  })
 })
 
 describe('cleanUrl', () => {

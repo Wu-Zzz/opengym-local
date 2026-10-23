@@ -83,8 +83,12 @@ const swStamp = {
 const flavor = {
   name: 'opengym-flavor',
   transformIndexHtml() {
-    if (process.env.VITE_MOBILE !== '1') return
-    return [{ tag: 'meta', attrs: { name: 'opengym-flavor', content: 'mobile' }, injectTo: 'head' }]
+    const tags = []
+    if (process.env.VITE_MOBILE === '1') tags.push({ tag: 'meta', attrs: { name: 'opengym-flavor', content: 'mobile' }, injectTo: 'head' })
+    // Keep the local site's version readable. Build identity stays in the HTML and makes
+    // the index hash (and thus the worker's cache) change even for maintenance-only releases.
+    if (process.env.VITE_LOCAL === '1' && process.env.APP_BUILD) tags.push({ tag: 'meta', attrs: { name: 'opengym-build', content: process.env.APP_BUILD }, injectTo: 'head' })
+    return tags
   }
 }
 
@@ -97,8 +101,9 @@ const flavor = {
 // number, so the one question a bug report turns on, "which build were you running?", had no
 // answer from inside the app. Unset (the ordinary case, and every upstream build) it changes
 // nothing: the string is exactly package.json's version.
+// The local-only site keeps APP_BUILD in its HTML metadata above, outside the visible version.
 const pkgVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
-const appVersion = process.env.APP_BUILD ? `${pkgVersion}+${process.env.APP_BUILD}` : pkgVersion
+const appVersion = process.env.APP_BUILD && process.env.VITE_LOCAL !== '1' ? `${pkgVersion}+${process.env.APP_BUILD}` : pkgVersion
 
 export default defineConfig({
   define: { __APP_VERSION__: JSON.stringify(appVersion) },

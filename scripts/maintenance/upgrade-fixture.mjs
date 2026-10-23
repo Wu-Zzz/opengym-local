@@ -4,7 +4,21 @@ import { createHash } from 'node:crypto'
 
 export const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64')
 export const imageHash = createHash('sha256').update(image).digest('hex')
+// A different, valid PNG referenced ONLY by dayPhotos. Reusing the exercise's hash would let
+// an older app accidentally keep this file for the wrong reason and hide unsafe rollback GC.
+export const dayImage = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64')
+export const dayImageHash = createHash('sha256').update(dayImage).digest('hex')
+export const exerciseFile = { hash: imageHash, bytes: image, mime: 'image/png' }
+export const dayFile = { hash: dayImageHash, bytes: dayImage, mime: 'image/png' }
 const at = Date.parse('2026-01-12T08:00:00Z')
+
+export function withDayPhoto(state) {
+  const removed = createHash('sha256').update('Previously removed synthetic day photo').digest('hex')
+  return { ...state, dayPhotos: { ...(state.dayPhotos || {}), [removed]: { _ts: at - 1000 }, [dayImageHash]: {
+    d: '2026-01-21', _ts: at,
+    m: { kind: 'image', hash: dayImageHash, mime: 'image/png', size: dayImage.length, width: 1, height: 1, at },
+  } } }
+}
 
 export function fixture(who = 'a', withMedia = true) {
   const exercise = `upgrade-${who}-exercise`

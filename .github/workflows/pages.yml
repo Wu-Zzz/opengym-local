@@ -104,6 +104,8 @@ jobs:
             git checkout --detach "$CANDIDATE"
           fi
           git worktree add --detach "$RUNNER_TEMP/opengym-baseline" "$BASELINE"
+          # Keep a real pre-handshake page in the upgrade tests, even after baseline advances.
+          git worktree add --detach "$RUNNER_TEMP/opengym-legacy" 98fd50962f45ebc8b20c997edb5c3924095cbbde
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -128,11 +130,15 @@ jobs:
           node scripts/catalogue/stage-media.mjs frontend/dist
           node scripts/maintenance/stamp-release.mjs "$RUNNER_TEMP/opengym-baseline/frontend/dist" "$BASELINE"
           node scripts/maintenance/stamp-release.mjs frontend/dist "$CANDIDATE"
+          npm --prefix "$RUNNER_TEMP/opengym-legacy/frontend" ci
+          APP_BUILD=98fd50962-legacy npm --prefix "$RUNNER_TEMP/opengym-legacy/frontend" run build
+          node "$RUNNER_TEMP/opengym-legacy/scripts/catalogue/stage-media.mjs" "$RUNNER_TEMP/opengym-legacy/frontend/dist"
       - name: Install isolated browser test tools
         run: npm --prefix scripts/maintenance ci
       - name: Chromium old data, backups, isolation, offline, upgrade and rollback
         env:
           UPGRADE_BROWSERS: chromium
+          LEGACY_DIST: ${{ runner.temp }}/opengym-legacy/frontend/dist
           BASELINE_DIST: ${{ runner.temp }}/opengym-baseline/frontend/dist
           CANDIDATE_DIST: ${{ github.workspace }}/frontend/dist
           UPGRADE_REPORT: ${{ runner.temp }}/upgrade-results/chromium.json
@@ -141,6 +147,7 @@ jobs:
       - name: WebKit old data, backups, isolation, offline, upgrade and rollback
         env:
           UPGRADE_BROWSERS: webkit
+          LEGACY_DIST: ${{ runner.temp }}/opengym-legacy/frontend/dist
           BASELINE_DIST: ${{ runner.temp }}/opengym-baseline/frontend/dist
           CANDIDATE_DIST: ${{ github.workspace }}/frontend/dist
           UPGRADE_REPORT: ${{ runner.temp }}/upgrade-results/webkit.json

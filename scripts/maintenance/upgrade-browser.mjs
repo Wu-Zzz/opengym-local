@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Run against TWO production builds, never a user's browser or the deployed website:
-// BASELINE_DIST=/absolute/old CANDIDATE_DIST=/absolute/new npm run test:upgrade
+// Run against production builds, never a user's browser or the deployed website:
+// BASELINE_DIST=/absolute/old CANDIDATE_DIST=/absolute/new LEGACY_DIST=/absolute/98fd50962 npm run test:upgrade
+// LEGACY_DIST is the fixed pre-handshake release, not the rolling rollback baseline.
 // npm ci && npx playwright install --with-deps chromium webkit  (Linux CI prerequisites)
 // Optional: UPGRADE_BROWSERS=chromium,webkit; UPGRADE_REPORT=/path/report.json;
 // UPGRADE_ARTIFACT_DIR=/path/artifacts (screenshots on failure, synthetic data only).
@@ -14,10 +15,12 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { resolve, join, extname, sep } from 'node:path'
 import { inflateRawSync } from 'node:zlib'
+import { setTimeout as delay } from 'node:timers/promises'
 import { chromium, webkit, devices } from 'playwright'
-import { fixture, image, imageHash } from './upgrade-fixture.mjs'
+import { fixture, exerciseFile, dayFile, withDayPhoto } from './upgrade-fixture.mjs'
 
 const BASE = '/opengym-local/'
+const FIXTURE = '/__opengym_upgrade_fixture'
 const STATE = 'gym_state_v1'
 const TIMEOUT = 45000
 const engines = { chromium, webkit }
@@ -29,6 +32,10 @@ let stage = 'baseline'
 let offline = false
 let origin
 const violations = []
+const EXERCISE_FILES = [exerciseFile]
+const ALL_FILES = [exerciseFile, dayFile]
+const probeBytes = Buffer.from('Unreferenced synthetic GC probe, never part of a backup')
+const gcProbe = { hash: hash(probeBytes), bytes: probeBytes, mime: 'application/octet-stream' }
 
 function step(name, text) { console.log(`[upgrade:${name}] ${text}`) }
 function hash(bytes) { return createHash('sha256').update(bytes).digest('hex') }
@@ -60,6 +67,7 @@ function contains(actual, expected, where = 'state') {
     for (const key of ['deleted', 'resetAt', 'resetIds', 'unitSet']) {
       assert.deepEqual(actual?.[key], expected?.[key], `state.${key}: conflict metadata changed`)
     }
+    if (expected?.dayPhotos) assert.deepEqual(actual?.dayPhotos, expected.dayPhotos, 'state.dayPhotos: photo references or cleared entries changed')
   }
   if (Array.isArray(expected)) {
     assert(Array.isArray(actual), `${where} is no longer an array`)
@@ -86,11 +94,11 @@ async function serve(builds) {
         violations.push({ method: req.method, path: url.pathname })
         res.writeHead(403); res.end('No data backend in this test'); return
       }
-      if (!url.pathname.startsWith(BASE)) { res.writeHead(404); res.end(); return }
+      if (url.pathname !== FIXTURE && !url.pathname.startsWith(BASE)) { res.writeHead(404); res.end(); return }
       res.setHeader('Cache-Control', 'no-store')
       // Even a future WebKit worker whose requests Playwright cannot inspect cannot connect out.
       res.setHeader('Content-Security-Policy', "connect-src 'self'; form-action 'none'")
-      if (url.pathname === BASE + '__fixture') { res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><title>Synthetic test setup</title>'); return }
+      if (url.pathname === FIXTURE) { res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><title>Synthetic test setup</title>'); return }
       const root = builds[stage].dir
       const rel = decodeURIComponent(url.pathname.slice(BASE.length)) || 'index.html'
       const file = resolve(root, rel)
@@ -136,12 +144,18 @@ async function contextFor(name) {
   return context
 }
 
-async function seed(page, state, media = false, legacyBlob = false) {
-  await page.goto(origin + BASE + '__fixture')
-  await page.evaluate(async ({ state, key, media, bytes, imageHash, legacyBlob }) => {
+async function seed(page, state, files = [], legacyBlob = false) {
+  await page.goto(origin + FIXTURE)
+  await page.evaluate(({ state, key }) => {
     localStorage.setItem(key, JSON.stringify(state))
     localStorage.setItem('gym_guest', '1')
-    if (!media) return
+  }, { state, key: STATE })
+  await putMedia(page, files, legacyBlob)
+}
+
+async function putMedia(page, files, legacyBlob = false) {
+  if (!files.length) return
+  await page.evaluate(async ({ files, legacyBlob }) => {
     const db = await new Promise((resolve, reject) => {
       const r = indexedDB.open('opengym-media', 1)
       r.onupgradeneeded = () => r.result.createObjectStore('blobs', { keyPath: 'hash' })
@@ -151,31 +165,51 @@ async function seed(page, state, media = false, legacyBlob = false) {
       const tx = db.transaction('blobs', 'readwrite')
       // WebKit's private test contexts reject Blob writes; the app's current schema deliberately
       // stores ArrayBuffer instead. Chromium also exercises reading the former Blob schema.
-      const data = new Uint8Array(bytes).buffer
-      tx.objectStore('blobs').put({ hash: imageHash, ...(legacyBlob ? { blob: new Blob([data], { type: 'image/png' }) } : { data }),
-        mime: 'image/png', size: bytes.length, putAt: 1, shownAt: 1, pending: true, rejected: null })
+      for (const { hash, bytes, mime } of files) {
+        const data = new Uint8Array(bytes).buffer
+        tx.objectStore('blobs').put({ hash, ...(legacyBlob ? { blob: new Blob([data], { type: mime }) } : { data }),
+          mime, size: bytes.length, putAt: 1, shownAt: 1, pending: true, rejected: null })
+      }
       tx.oncomplete = resolve
       tx.onerror = () => reject(new Error('Fixture media write failed: ' + (tx.error?.message || 'IndexedDB error')))
       tx.onabort = () => reject(new Error('Fixture media write aborted: ' + (tx.error?.message || 'IndexedDB abort')))
     })
     db.close()
-  }, { state, key: STATE, media, bytes: [...image], imageHash, legacyBlob })
+  }, { files: files.map(f => ({ ...f, bytes: [...f.bytes] })), legacyBlob })
 }
 
 async function openData(page) {
   await page.goto(origin + BASE + '#/settings/data', { waitUntil: 'domcontentloaded' })
-  await page.getByText('Export backup (JSON)', { exact: true }).waitFor()
+  try { await page.getByText('Export backup (JSON)', { exact: true }).waitFor() }
+  catch (error) {
+    console.error('[startup]', await page.evaluate(async () => ({ href: location.href, text: document.body.innerText,
+      controller: navigator.serviceWorker.controller?.state, caches: await caches.keys(),
+      registrations: (await navigator.serviceWorker.getRegistrations()).map(r => ({ scope: r.scope, active: r.active?.state, installing: r.installing?.state, waiting: r.waiting?.state })) })))
+    throw error
+  }
 }
 
 async function workerReady(page, cache, removedCache = null) {
-  await page.waitForFunction(async ({ cache, removedCache }) => {
+  await waitForAsync(page, async ({ cache, removedCache }) => {
     const registration = await navigator.serviceWorker?.getRegistration()
     const keys = await caches.keys()
     return registration?.active?.state === 'activated' && navigator.serviceWorker.controller === registration.active &&
       keys.includes(cache) && (!removedCache || !keys.includes(removedCache))
-  }, { cache, removedCache }, { timeout: TIMEOUT })
+  }, { cache, removedCache }, 'The new worker did not activate and replace the old cache')
   const scope = await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).scope)
   assert.equal(scope, origin + BASE, 'Service worker must own the deployed subpath')
+}
+
+// Playwright's waitForFunction polls synchronous predicates. A Promise itself is truthy, so
+// using an async predicate can return its FIRST false result without waiting for the state.
+// Await these IDB/Cache API checks explicitly before scheduling another bounded observation.
+async function waitForAsync(page, predicate, arg, message) {
+  const deadline = Date.now() + TIMEOUT
+  while (Date.now() < deadline) {
+    if (await page.evaluate(predicate, arg)) return
+    await delay(100)
+  }
+  throw new Error(message)
 }
 
 async function records(page) { return page.evaluate(key => JSON.parse(localStorage.getItem(key)), STATE) }
@@ -199,15 +233,53 @@ async function mediaBytes(page) {
   })
 }
 
-async function assertMedia(page, present) {
+async function assertMedia(page, files = []) {
   const rows = await mediaBytes(page)
-  assert.equal(rows.length, present ? 1 : 0, 'Media records leaked, disappeared or duplicated')
-  if (present) {
-    assert.equal(rows[0].hash, imageHash)
-    assert.equal(rows[0].mime, 'image/png')
-    assert.equal(rows[0].size, image.length)
-    assert.equal(hash(Buffer.from(rows[0].bytes)), imageHash, 'IndexedDB image bytes changed')
+  assert.equal(rows.length, files.length, `Media records leaked, disappeared or duplicated: actual=${rows.map(r => r.hash)} expected=${files.map(f => f.hash)}`)
+  for (const file of files) {
+    const row = rows.find(r => r.hash === file.hash)
+    assert(row, `IndexedDB omitted ${file.hash === dayFile.hash ? 'day-only' : 'exercise'} photo`)
+    assert.equal(row.mime, file.mime)
+    assert.equal(row.size, file.bytes.length)
+    assert.equal(hash(Buffer.from(row.bytes)), file.hash, 'IndexedDB image bytes changed')
   }
+}
+
+// A same-origin page OUTSIDE the worker scope lets us insert an old orphan without app code or
+// racing the currently running GC. It is not mistaken for an old app tab by the capability gate.
+// The orphan's disappearance proves the PRODUCTION app actually ran its cleanup. Every real
+// fixture file also has putAt=1, well beyond the one-hour grace period, so retention is not luck.
+async function reopenThroughGc(page) {
+  await page.goto(origin + FIXTURE)
+  assert.equal(await page.title(), 'Synthetic test setup', 'App worker intercepted an unrelated page outside its scope')
+  await putMedia(page, [gcProbe])
+  await page.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const r = indexedDB.open('opengym-media', 1)
+      r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error)
+    })
+    try {
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction('blobs', 'readwrite'), store = tx.objectStore('blobs')
+        const r = store.getAll()
+        r.onsuccess = () => { for (const row of r.result) store.put({ ...row, putAt: 1 }) }
+        tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error)
+      })
+    } finally { db.close() }
+  })
+  await openData(page)
+  await waitForAsync(page, async probe => {
+    const db = await new Promise((resolve, reject) => {
+      const r = indexedDB.open('opengym-media', 1)
+      r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error)
+    })
+    try {
+      return await new Promise((resolve, reject) => {
+        const r = db.transaction('blobs', 'readonly').objectStore('blobs').get(probe)
+        r.onsuccess = () => resolve(!r.result); r.onerror = () => reject(r.error)
+      })
+    } finally { db.close() }
+  }, gcProbe.hash, 'Production local media cleanup did not remove the aged, unreferenced probe')
 }
 
 async function download(page, type, label) {
@@ -241,7 +313,7 @@ function readZip(bytes) {
   return entries
 }
 
-async function checkExports(page, expected, label) {
+async function checkExports(page, expected, label, files = EXERCISE_FILES) {
   const json = await download(page, 'json', label)
   const state = JSON.parse(json.bytes.toString('utf8'))
   contains(state, expected)
@@ -249,13 +321,17 @@ async function checkExports(page, expected, label) {
   const entries = readZip(zip.bytes)
   assert(entries.has('opengym-backup.json'), 'ZIP has no state document')
   contains(JSON.parse(entries.get('opengym-backup.json')), state)
-  const photo = entries.get(`media/${imageHash}.png`)
-  assert(photo, 'ZIP omitted the local custom-exercise photo')
-  assert.equal(hash(photo), imageHash, 'ZIP changed photo bytes')
+  const exportedFiles = [...entries.keys()].filter(n => n.startsWith('media/'))
+  assert.equal(exportedFiles.length, files.length, 'ZIP media count changed')
+  for (const file of files) {
+    const photo = entries.get(`media/${file.hash}.png`)
+    assert(photo, `ZIP omitted ${file.hash === dayFile.hash ? 'day-only' : 'exercise'} photo`)
+    assert.equal(hash(photo), file.hash, 'ZIP changed photo bytes')
+  }
   return { json, zip, state }
 }
 
-async function checkImport(name, file, expected, withMedia) {
+async function checkImport(name, file, expected, files) {
   const context = await contextFor(name)
   try {
     const page = await context.newPage()
@@ -263,11 +339,10 @@ async function checkImport(name, file, expected, withMedia) {
     await openData(page)
     await importInto(page, file, expected)
     containsImported(await records(page), expected)
-    await assertMedia(page, withMedia)
-    await page.reload({ waitUntil: 'domcontentloaded' })
-    await page.getByText('Export backup (JSON)', { exact: true }).waitFor()
+    await assertMedia(page, files)
+    await reopenThroughGc(page)
     containsImported(await records(page), expected)
-    await assertMedia(page, withMedia)
+    await assertMedia(page, files)
   } finally { await context.close() }
 }
 
@@ -276,6 +351,117 @@ async function importInto(page, file, expected) {
   await page.getByRole('button', { name: 'Import', exact: true }).click()
   await page.waitForFunction(({ key, id }) => JSON.parse(localStorage.getItem(key))?.workouts?.some(w => w.id === id),
     { key: STATE, id: expected.workouts.at(-1).id })
+}
+
+async function waitForWorkoutIds(page, ids) {
+  await page.waitForFunction(({ key, ids }) => {
+    const workouts = JSON.parse(localStorage.getItem(key))?.workouts || []
+    return JSON.stringify(workouts.map(w => w.id).sort()) === JSON.stringify(ids)
+  }, { key: STATE, ids: [...ids].sort() })
+}
+
+function containsEntries(actual, expected, field) {
+  assert.deepEqual(actual.map(x => x.id).sort(), expected.map(x => x.id).sort(), `${field}: imported entry ids changed`)
+  for (const entry of expected) containsImported(actual.find(x => x.id === entry.id), entry)
+}
+
+// These paths were added for guests in d92ce229. Empty-device imports cannot exercise them:
+// the device must own a workout absent from the selected backup, plus its own running session.
+async function checkGuestImport(name, backup) {
+  const context = await contextFor(name)
+  try {
+    const page = await context.newPage()
+    const local = fixture('guest', false)
+    local.restSec = 43
+    local.bodyweight.push({ d: '2026-02-01', w: 62.75, t: Date.parse('2026-02-01T08:00:00Z') })
+    await seed(page, local)
+    await openData(page)
+    const before = await records(page)
+    const conflict = async () => {
+      await page.locator('input[type=file][accept*=".json"]').setInputFiles(backup.zip.path)
+      await page.getByText('This device has 1 workout that is not in this backup. Replacing deletes it.', { exact: true }).waitFor()
+      await page.getByText('Merge them in', { exact: true }).waitFor()
+      await page.getByText('Replace anyway', { exact: true }).waitFor()
+    }
+
+    await conflict()
+    await page.getByText('Cancel', { exact: true }).click()
+    await page.getByText('Merge them in', { exact: true }).waitFor({ state: 'hidden' })
+    assert.deepEqual(await records(page), before, 'Cancelling an import changed the device profile')
+    await assertMedia(page) // ZIP files must not be written before confirmation.
+
+    await conflict()
+    await page.getByText('Merge them in', { exact: true }).click()
+    await waitForWorkoutIds(page, [...before.workouts, ...backup.state.workouts].map(w => w.id))
+    const merged = await records(page)
+    for (const field of ['workouts', 'routines', 'customEx']) {
+      containsEntries(merged[field], [...backup.state[field], ...before[field]], field)
+    }
+    assert.equal(merged.restSec, backup.state.restSec, 'Guest merge did not keep the backup settings')
+    containsImported(merged.active, before.active)
+    containsImported(merged.dayPhotos, backup.state.dayPhotos)
+    assert.deepEqual(merged.bodyweight.map(x => x.d).sort(), [...new Set([...before.bodyweight, ...backup.state.bodyweight].map(x => x.d))].sort())
+    for (const entry of before.bodyweight) containsImported(merged.bodyweight.find(x => x.d === entry.d), entry)
+    await assertMedia(page, ALL_FILES)
+    await reopenThroughGc(page)
+    contains(await records(page), merged)
+    await assertMedia(page, ALL_FILES)
+
+    // The destructive path is permitted only after the explicit choice, on this synthetic
+    // profile. The running session must still survive, as importBackup promises in both paths.
+    await conflict()
+    await page.getByText('Replace anyway', { exact: true }).click()
+    await waitForWorkoutIds(page, backup.state.workouts.map(w => w.id))
+    const replaced = await records(page)
+    containsImported(replaced, { ...backup.state, active: before.active })
+    await assertMedia(page, ALL_FILES)
+    await reopenThroughGc(page)
+    contains(await records(page), replaced)
+    await assertMedia(page, ALL_FILES)
+  } finally { await context.close() }
+}
+
+async function checkLegacyTab(name, builds) {
+  const context = await contextFor(name)
+  try {
+    stage = 'legacy'
+    const oldPage = await context.newPage()
+    const state = fixture('stale')
+    await seed(oldPage, state, EXERCISE_FILES)
+    await openData(oldPage)
+    await workerReady(oldPage, builds.legacy.cache)
+    await reopenThroughGc(oldPage)
+    contains(await records(oldPage), state)
+    await assertMedia(oldPage, EXERCISE_FILES)
+    const before = await records(oldPage)
+    const beforeMedia = await mediaBytes(oldPage)
+
+    // Keep the real old document alive. Switching just the server does not refresh that tab's
+    // JavaScript; its old GC is precisely why the new app must wait for this tab to close.
+    stage = 'candidate'
+    const candidatePage = await context.newPage()
+    await candidatePage.goto(origin + BASE + '#/settings/data', { waitUntil: 'domcontentloaded' })
+    await candidatePage.getByText('请先关闭旧版页面', { exact: true }).waitFor()
+    assert.equal(await candidatePage.getByText('Export backup (JSON)', { exact: true }).count(), 0,
+      'Candidate application started while an incompatible legacy document remained open')
+    await oldPage.getByText('Export backup (JSON)', { exact: true }).waitFor()
+    assert.deepEqual(await records(oldPage), before, 'Blocked candidate changed the old device profile')
+    assert.deepEqual(await mediaBytes(oldPage), beforeMedia, 'Blocked candidate changed old IndexedDB media')
+
+    await oldPage.close()
+    await candidatePage.getByRole('button', { name: '重试', exact: true }).click()
+    await candidatePage.getByText('Export backup (JSON)', { exact: true }).waitFor()
+    await workerReady(candidatePage, builds.candidate.cache, builds.legacy.cache)
+    contains(await records(candidatePage), before)
+    await assertMedia(candidatePage, EXERCISE_FILES)
+
+    const secondPage = await context.newPage()
+    await openData(secondPage)
+    // Compatible tabs answer one another instead of getting stuck in a permanent safety gate.
+    contains(await records(secondPage), before)
+    await assertMedia(secondPage, EXERCISE_FILES)
+    await candidatePage.getByText('Export backup (JSON)', { exact: true }).waitFor()
+  } finally { await context.close(); stage = 'candidate' }
 }
 
 async function switchBuild(pages, builds, target, previous) {
@@ -296,8 +482,7 @@ async function switchBuild(pages, builds, target, previous) {
     assert.equal(hash(shell), builds[target].htmlHash, 'Updated worker served the wrong application shell')
     // Reopen the app in this SAME profile after the worker takes ownership. The explicit
     // offline reload below separately verifies refresh; this navigation models app reopening.
-    await page.goto('about:blank')
-    await openData(page)
+    await reopenThroughGc(page)
   }
 }
 
@@ -312,19 +497,19 @@ async function run(name, builds) {
     const a = await contextFor(name), b = await contextFor(name)
     contexts.push(a, b)
     const pa = await a.newPage(), pb = await b.newPage()
-    await seed(pa, fixture('a'), true, name === 'chromium')
+    await seed(pa, fixture('a'), EXERCISE_FILES, name === 'chromium')
     await seed(pb, fixture('b', false))
     await openData(pa); await openData(pb)
     await workerReady(pa, builds.baseline.cache); await workerReady(pb, builds.baseline.cache)
     contains(await records(pa), fixture('a')); contains(await records(pb), fixture('b', false))
-    await assertMedia(pa, true); await assertMedia(pb, false)
+    await assertMedia(pa, EXERCISE_FILES); await assertMedia(pb)
     const old = await checkExports(pa, fixture('a'), `${name}-baseline`)
     result.checks.push('baseline production UI and JSON/ZIP exports', 'separate contexts own separate records and media')
     step(name, 'baseline state, media and exports verified; replacing same-origin build')
 
     await switchBuild([pa, pb], builds, 'candidate', 'baseline')
     contains(await records(pa), fixture('a')); contains(await records(pb), fixture('b', false))
-    await assertMedia(pa, true); await assertMedia(pb, false)
+    await assertMedia(pa, EXERCISE_FILES); await assertMedia(pb)
     const upgraded = await checkExports(pa, old.state, `${name}-candidate`)
     result.checks.push('old service worker replaced and old shell cache removed', 'candidate production exports preserve baseline fields and media bytes')
 
@@ -337,23 +522,23 @@ async function run(name, builds) {
     await pa.getByText('Export backup (JSON)', { exact: true }).waitFor()
     await pb.getByText('Export backup (JSON)', { exact: true }).waitFor()
     contains(await records(pa), fixture('a')); contains(await records(pb), fixture('b', false))
-    await assertMedia(pa, true); await assertMedia(pb, false)
+    await assertMedia(pa, EXERCISE_FILES); await assertMedia(pb)
     await checkExports(pa, old.state, `${name}-offline`)
     result.checks.push('offline app reload and real backup exports after upgrade')
     offline = false
     await a.setOffline(false); await b.setOffline(false)
 
     step(name, 'importing old and upgraded backups into fresh browser contexts')
-    await checkImport(name, old.json.path, fixture('a'), false)
-    await checkImport(name, old.zip.path, fixture('a'), true)
-    await checkImport(name, upgraded.zip.path, fixture('a'), true)
+    await checkImport(name, old.json.path, fixture('a'), [])
+    await checkImport(name, old.zip.path, fixture('a'), EXERCISE_FILES)
+    await checkImport(name, upgraded.zip.path, fixture('a'), EXERCISE_FILES)
     // Importing elsewhere cannot write into either original context.
     contains(await records(pa), fixture('a')); contains(await records(pb), fixture('b', false))
-    await assertMedia(pb, false)
+    await assertMedia(pb)
     result.checks.push('baseline JSON and ZIP import in candidate production UI', 'candidate ZIP round trip', 'no cross-context writes')
 
     step(name, 'adding data in candidate, rolling program back, then upgrading again')
-    const next = structuredClone(upgraded.state)
+    const next = withDayPhoto(structuredClone(upgraded.state))
     next.workouts.push({ ...structuredClone(next.workouts[0]), id: 'upgrade-a-after-update', d: '2026-01-20', name: 'Added in candidate', note: 'Must survive program rollback' })
     next.bodyweight.push({ d: '2026-01-20', w: 63.5, t: Date.parse('2026-01-20T08:00:00Z') })
     next.restSec = 105
@@ -362,16 +547,34 @@ async function run(name, builds) {
     // Use the same supported production import UI that users use to add their history.
     await importInto(pa, addition, next)
     containsImported(await records(pa), next)
+    await putMedia(pa, [dayFile])
+    await reopenThroughGc(pa)
     const afterAddition = await records(pa)
-    await assertMedia(pa, true)
+    containsImported(afterAddition, next)
+    await assertMedia(pa, ALL_FILES)
+    const withPhotos = await checkExports(pa, afterAddition, `${name}-day-photos`, ALL_FILES)
+    await checkImport(name, withPhotos.zip.path, afterAddition, ALL_FILES)
+    await checkGuestImport(name, withPhotos)
+    result.checks.push('day-only photo survives actual local garbage collection and production ZIP round trip', 'guest import cancellation, merge and explicit replacement preserve the promised local data')
     await switchBuild([pa, pb], builds, 'baseline', 'candidate')
-    await checkExports(pa, afterAddition, `${name}-rollback`)
-    await assertMedia(pa, true)
+    await assertMedia(pa, ALL_FILES)
+    await checkExports(pa, afterAddition, `${name}-rollback`, ALL_FILES)
     contains(await records(pb), fixture('b', false))
     await switchBuild([pa, pb], builds, 'candidate', 'baseline')
     contains(await records(pa), afterAddition)
-    await assertMedia(pa, true); await assertMedia(pb, false)
+    await assertMedia(pa, ALL_FILES); await assertMedia(pb)
+    await checkExports(pa, afterAddition, `${name}-re-upgrade`, ALL_FILES)
     result.checks.push('candidate-added history, weight and preference survive program rollback and re-upgrade', 'unfinished session and deletion/reset/unit metadata survive program changes')
+    await pa.goto(origin + BASE + '#/settings/about')
+    const version = pa.locator('.lrow').filter({ has: pa.getByText('Version', { exact: true }) }).locator('.lrow-v')
+    await version.waitFor()
+    result.displayVersion = (await version.innerText()).trim()
+    assert.match(result.displayVersion, /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, 'About must show the release version without a build hash')
+    contains(await records(pa), afterAddition)
+    result.checks.push('About shows a readable release version without build metadata')
+    step(name, 'keeping a real legacy tab open while the candidate attempts to start')
+    await checkLegacyTab(name, builds)
+    result.checks.push('fixed legacy document blocks candidate startup without changing records or media', 'closing legacy tab and retrying starts candidate; two compatible tabs can coexist')
     assert.deepEqual(violations.slice(beforeViolations), [], 'Network upload, external request or browser exception detected')
     result.checks.push('no API requests, uploads, external requests or page exceptions')
     result.passed = true
@@ -382,7 +585,7 @@ async function run(name, builds) {
       const dir = resolve(process.env.UPGRADE_ARTIFACT_DIR)
       await mkdir(dir, { recursive: true })
       for (const [i, ctx] of contexts.entries()) {
-        const page = ctx.pages()[0]
+        const page = ctx.pages().findLast(p => p.url() !== 'about:blank') || ctx.pages().at(-1)
         if (page) await page.screenshot({ path: join(dir, `${name}-${i}-failure.png`), fullPage: true }).catch(() => {})
       }
     }
@@ -394,9 +597,10 @@ async function run(name, builds) {
 }
 
 try {
-  const builds = { baseline: await buildAt('BASELINE_DIST'), candidate: await buildAt('CANDIDATE_DIST') }
+  const builds = { baseline: await buildAt('BASELINE_DIST'), candidate: await buildAt('CANDIDATE_DIST'), legacy: await buildAt('LEGACY_DIST') }
   assert.notEqual(builds.baseline.swHash, builds.candidate.swHash, 'Builds have identical workers; use distinct APP_BUILD values to exercise an actual upgrade')
   assert.notEqual(builds.baseline.cache, builds.candidate.cache, 'Builds must have distinct shell caches')
+  assert.notEqual(builds.legacy.swHash, builds.candidate.swHash, 'LEGACY_DIST must remain the fixed pre-handshake release')
   report.builds = Object.fromEntries(Object.entries(builds).map(([name, { dir: _dir, ...b }]) => [name, b]))
   temp = await mkdtemp(join(tmpdir(), 'opengym-upgrade-'))
   await serve(builds)

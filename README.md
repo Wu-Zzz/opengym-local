@@ -25,8 +25,12 @@ GitHub Pages 免费公开仓库托管，使用免费 github.io 地址；没有�
 涉及数据格式、本地存储、备份、联网、依赖、测试或发布配置的变化，以及合并冲突，都会停止自动发布，等待维护者检查。
 
 发布前运行前端回归测试，并在 Chromium 和 WebKit 中用合成旧数据验证升级、离线重开、JSON/ZIP 备份恢复、浏览器隔离和程序回退。
+兼容测试还覆盖旧页面与新版同时打开、备份合并/取消/替换，以及进度照片经历本地清理和版本回退后的文件完整性。
 测试与发布权限分开，发布的是同一次运行中已测试的构建；发布失败会尝试恢复上一版网页，自动合并的源码会增加回退提交并暂停后续自动更新。
 网站地址和本地保存方式保持不变。测试不能保证覆盖所有情况，手机里的重要记录仍请定期导出备份；程序回退不能恢复被用户清除的数据。
+
+如果升级时提示另一个旧版页面仍在打开，请先在旧页面完成当前操作，关闭它，再回新版重试；不用清除网站数据。
+“关于与更新”显示上游版本号（当前为 v1.4.2）；具体构建标识保存在页面元信息和 `release.json` 中，供维护时核对。
 
 运行结果与需要人工处理的原因见 [GitHub Actions](https://github.com/Wu-Zzz/opengym-local/actions/workflows/pages.yml)。失败通知取决于你的 GitHub 通知设置。
 每月检查记录保存在独立 `maintenance-checks` 分支，用于记录云端任务活动；不会修改主分支或触发网页更新。
@@ -65,6 +69,7 @@ on your phone, synced across your devices, behind your own passkey login.
 [Website](https://opengym.ch) ·
 [Live demo](https://opengym.ch/demo/) ·
 [Android APK](https://github.com/DuarteSantos8/openGym/releases/latest) ·
+[iPhone beta (TestFlight)](https://testflight.apple.com/join/RKATb61k) ·
 [Self-hosting guide](docs/SELF_HOSTING.md) ·
 [Roadmap](ROADMAP.md) ·
 [Changelog](CHANGELOG.md)
@@ -230,10 +235,13 @@ The same codebase builds a standalone app with Capacitor: no account, no server,
 on the phone, with native reminders and a rest countdown in the notification shade.
 
 - **Android:** download the signed APK from the [latest release](https://github.com/DuarteSantos8/openGym/releases/latest)
-  or the [website](https://opengym.ch). Each build sits next to its `.sha256`, and
-  the app checks for updates itself. openGym is deliberately not on the Play Store.
-- **iPhone:** Apple doesn't allow installs outside the App Store. Self-host and add the PWA to your
-  home screen from Safari, or build the native app onto your own device with Xcode.
+  or the [website](https://opengym.ch): Standard (`openGym-X.Y.Z.apk`, 180 px animations, about
+  315 MB), Plus (`openGym-Plus-X.Y.Z.apk`, 240 px, about 424 MB) or HD (`openGym-HD-X.Y.Z.apk`,
+  360 px, about 760 MB). Each sits next to its `.sha256`,
+  checks for updates itself and stays the kind you picked. A Google Play version is on its way.
+- **iPhone and Apple Watch:** the App Store app, with a public
+  [TestFlight beta](https://testflight.apple.com/join/RKATb61k) until it is out. Or self-host and
+  add the PWA to your home screen from Safari.
 
 Details and build instructions: [docs/MOBILE.md](docs/MOBILE.md).
 
@@ -342,8 +350,8 @@ two weeks after it.
 
 GitHub is the home of the project. [gitlab.com/DuarteSantos8/opengym](https://gitlab.com/DuarteSantos8/opengym)
 is a mirror, updated by a GitHub Actions workflow on every push to `main` and every release tag. It
-exists because its CI builds the release artifacts: the signed APK, the multi-arch images and the
-SBOMs. Nothing is merged there by hand. In the changelog, `!NN` refers to a GitLab merge request
+exists because its CI builds the multi-arch images and the SBOMs for its registry (the APKs are
+built and signed on the release machine and attached to the GitHub release). Nothing is merged there by hand. In the changelog, `!NN` refers to a GitLab merge request
 from the weeks in August and September 2026 when the project lived there.
 
 ## How openGym is built

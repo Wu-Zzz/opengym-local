@@ -1,7 +1,7 @@
 /* The code the app splits off and loads on demand (the photo and video ingest, the QR reader, the
  * local Coach) was cached only once the page had needed it with a network. The first photo added
  * offline after an update had no ingest to run. The build now lists those chunks into sw.js and
- * the install fetches them, best effort, leaving the big language packs to load as they always did. */
+ * the install requires them, leaving the big language packs to load as they always did. */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
@@ -37,16 +37,14 @@ describe('the worker keeps the on-demand code too', () => {
     expect([...cache.keys()]).toEqual(expect.arrayContaining(['./assets/media-ingest-x.js', './assets/jsQR-y.js', 'index.html']))
   })
 
-  it('a chunk that will not come is no reason to fail the install', async () => {
-    const sw = stampSw(source, { stamp: 'abc', lazy: ['./assets/media-ingest-x.js', './assets/gone.js'] })
-    const cache = await install(sw, async u => {
-      if (String(u) === 'index.html') return ok(shell)
-      if (String(u).includes('gone')) throw new TypeError('network down')
-      if (String(u).includes('media-ingest')) return { ok: true, status: 200, redirected: true }
-      return ok('')
-    })
-    expect([...cache.keys()]).toContain('index.html')
-    expect([...cache.keys()]).not.toContain('./assets/media-ingest-x.js')   // a login page is not the ingest
+  it('a missing or redirected on-demand chunk fails the install, including ordinary server builds', async () => {
+    const sw = stampSw(source, { stamp: 'abc', lazy: ['./assets/App.js'] })
+    for (const fail of [() => { throw new TypeError('network down') }, () => ({ ok: true, status: 200, redirected: true })]) {
+      await expect(install(sw, async u => {
+        if (String(u) === 'index.html') return ok(shell)
+        return String(u) === './assets/App.js' ? fail() : ok('')
+      })).rejects.toThrow()
+    }
   })
 
   it('an unstamped worker (dev, tests) has nothing extra to fetch', async () => {
