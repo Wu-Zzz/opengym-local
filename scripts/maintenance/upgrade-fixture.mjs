@@ -2,7 +2,7 @@
 // a personal browser profile or connecting to a deployed instance.
 import { createHash } from 'node:crypto'
 
-export const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN1kAAAAASUVORK5CYII=', 'base64')
+export const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64')
 export const imageHash = createHash('sha256').update(image).digest('hex')
 const at = Date.parse('2026-01-12T08:00:00Z')
 
