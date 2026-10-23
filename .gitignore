@@ -27,6 +27,7 @@ result-*
 junit.xml
 coverage/
 frontend/bundle-size.json
+maintenance-transfer/
 
 # Local planning notes
 docs/superpowers/plans/

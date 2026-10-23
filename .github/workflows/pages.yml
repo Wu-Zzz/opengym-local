@@ -1,4 +1,4 @@
-name: Deploy local openGym to GitHub Pages
+name: Test and publish local openGym
 
 on:
   push:
@@ -7,50 +7,218 @@ on:
       - 'frontend/**'
       - 'catalogue/**'
       - 'scripts/catalogue/**'
+      - 'scripts/maintenance/**'
       - '.github/workflows/pages.yml'
+  schedule:
+    # Monday 10:17 in Asia/Taipei (UTC+8); avoid the busy top of the hour.
+    - cron: '17 2 * * 1'
   workflow_dispatch:
+    inputs:
+      verify_current:
+        description: Also test and publish when upstream has no new commits
+        type: boolean
+        default: false
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
+env:
+  TZ: UTC
+
+# One pipeline owns preparation, promotion, deployment and recovery. Never cancel it mid-release.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  build:
+  prepare:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      verify: ${{ steps.candidate.outputs.verify }}
+      base: ${{ steps.candidate.outputs.base }}
+      baseline: ${{ steps.candidate.outputs.baseline }}
+      candidate: ${{ steps.candidate.outputs.candidate }}
+      update: ${{ steps.candidate.outputs.update }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-        working-directory: frontend
-      - run: npm test -- --maxWorkers=2 src/store/useStore.local-only.test.js src/lib/api.local-only.test.js
-        working-directory: frontend
-      - run: npm run build
-        working-directory: frontend
+      - name: Test update policy
+        run: node --test scripts/maintenance/update-policy.test.mjs scripts/maintenance/cloud-update.test.mjs
+      - name: Prepare an isolated candidate, without changing main
+        id: candidate
+        run: node scripts/maintenance/cloud-update.mjs prepare
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          VERIFY_CURRENT: ${{ inputs.verify_current }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: maintenance-candidate
+          path: maintenance-transfer/
+          retention-days: 30
+          if-no-files-found: error
+
+  test:
+    needs: prepare
+    if: needs.prepare.outputs.verify == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: maintenance-candidate
+          path: maintenance-transfer
+      - name: Check out exactly the prepared candidate and production baseline
+        env:
+          CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+          BASELINE: ${{ needs.prepare.outputs.baseline }}
+          HAS_UPDATE: ${{ needs.prepare.outputs.update }}
+        run: |
+          if [ "$HAS_UPDATE" = true ]; then
+            git fetch "$GITHUB_WORKSPACE/maintenance-transfer/candidate.bundle" HEAD
+            test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE"
+            git checkout --detach "$CANDIDATE"
+          fi
+          git worktree add --detach "$RUNNER_TEMP/opengym-baseline" "$BASELINE"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install application test dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Application regression tests
+        run: npm test -- --maxWorkers=2
+        working-directory: frontend
+      - name: Build previous and candidate local-only sites
+        env:
+          BASELINE: ${{ needs.prepare.outputs.baseline }}
+          CANDIDATE: ${{ needs.prepare.outputs.candidate }}
           VITE_LOCAL: '1'
-      # The 180 px stills and animations from catalogue/media, served next to the demo
-      - run: node scripts/catalogue/stage-media.mjs frontend/dist
-      - run: touch frontend/dist/.nojekyll
-      - uses: actions/configure-pages@v6
+          VITE_DEMO: '0'
+          VITE_MOBILE: '0'
+        run: |
+          npm --prefix "$RUNNER_TEMP/opengym-baseline/frontend" ci
+          APP_BUILD="$BASELINE-baseline" npm --prefix "$RUNNER_TEMP/opengym-baseline/frontend" run build
+          node "$RUNNER_TEMP/opengym-baseline/scripts/catalogue/stage-media.mjs" "$RUNNER_TEMP/opengym-baseline/frontend/dist"
+          APP_BUILD="$CANDIDATE" npm --prefix frontend run build
+          node scripts/catalogue/stage-media.mjs frontend/dist
+          node scripts/maintenance/stamp-release.mjs "$RUNNER_TEMP/opengym-baseline/frontend/dist" "$BASELINE"
+          node scripts/maintenance/stamp-release.mjs frontend/dist "$CANDIDATE"
+      - name: Install isolated browser test tools
+        run: |
+          npm --prefix scripts/maintenance ci
+          npm --prefix scripts/maintenance exec -- playwright install --with-deps chromium webkit
+      - name: Old data, backups, browser isolation, offline, upgrade and rollback
+        env:
+          BASELINE_DIST: ${{ runner.temp }}/opengym-baseline/frontend/dist
+          CANDIDATE_DIST: ${{ github.workspace }}/frontend/dist
+          UPGRADE_REPORT: ${{ runner.temp }}/upgrade-results/report.json
+          UPGRADE_ARTIFACT_DIR: ${{ runner.temp }}/upgrade-results
+        run: npm --prefix scripts/maintenance run test:upgrade
+      - name: Keep the browser verification result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upgrade-verification
+          path: ${{ runner.temp }}/upgrade-results/
+          retention-days: 30
+          if-no-files-found: ignore
       - uses: actions/upload-pages-artifact@v5
         with:
+          name: candidate-pages
           path: frontend/dist
+          retention-days: 1
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          name: baseline-pages
+          path: ${{ runner.temp }}/opengym-baseline/frontend/dist
+          retention-days: 1
 
-  deploy:
-    needs: build
+  publish:
+    needs: [prepare, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - id: deploy
+      # Run trusted starting-revision code here, never candidate npm scripts with a write token.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          name: maintenance-candidate
+          path: maintenance-transfer
+      - uses: actions/configure-pages@v6
+      - name: Promote only the verified commit, refusing concurrent main changes
+        id: promote
+        run: node scripts/maintenance/cloud-update.mjs promote
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Deploy the exact tested artifact
+        id: deploy
         uses: actions/deploy-pages@v5
+        with:
+          artifact_name: candidate-pages
+          timeout: 300000
+      - name: Verify the public release
+        run: node scripts/maintenance/cloud-update.mjs smoke
+      - name: Restore previous website if publication or public verification failed
+        id: restore
+        if: failure() && steps.promote.outcome == 'success'
+        uses: actions/deploy-pages@v5
+        with:
+          artifact_name: baseline-pages
+          timeout: 300000
+      - name: Revert automatic source update and pause, even if website recovery failed
+        if: failure() && steps.promote.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/maintenance/cloud-update.mjs rollback
+      - name: Verify the restored public version
+        if: failure() && steps.restore.outcome == 'success'
+        env:
+          ROLLBACK: 'true'
+        run: node scripts/maintenance/cloud-update.mjs smoke
+
+  check-record:
+    needs: prepare
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Record the monthly cloud check on a separate maintenance branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+        run: node scripts/maintenance/cloud-update.mjs heartbeat

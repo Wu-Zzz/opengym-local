@@ -596,7 +596,10 @@ describe('the gate has something real to read', () => {
     // into it — not the spelling of the expression that does it.
     const { readFileSync } = await import('node:fs')
     const src = readFileSync(new URL('../store/useStore.js', import.meta.url), 'utf8')
-    expect(src).toMatch(/\bconfig:\s*null\b/)
+    // Server mode still starts uncached and fetches config below. The static local-only
+    // build instead starts with its fixed offline config; its behavior is tested in
+    // useStore.local-only.test.js, including disabled Coach and no backend requests.
+    expect(src).toMatch(/\bconfig:\s*(?:LOCAL_ONLY\s*\?\s*LOCAL_CONFIG\s*:\s*)?null\b/)
     expect(src).toMatch(/set\(\s*\{\s*config[:\s]/)
     expect(src).toMatch(/api\(['"]\/api\/config['"]\)/)
     // and boot() must actually reach it, however it is spelled

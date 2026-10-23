@@ -20,8 +20,20 @@ GitHub Pages 免费公开仓库托管，使用免费 github.io 地址；没有�
 训练数据不上传；托管商仍会接收正常的网页/图片下载请求。
 
 本地构建：`cd frontend && npm ci && npm run build:local`。
-主分支推送后，唯一启用的 Pages 工作流运行本地模式测试、构建、打包动作媒体并发布。
-测试和实现见 `frontend/src/lib/local-mode.js`、`frontend/src/store/useStore.local-only.test.js`。
+每周一北京时间约 10:17，GitHub Actions 在云端检查上游更新，Mac 关机也能运行。平台繁忙时可能延迟。
+没有更新时保留当前版本；普通界面、翻译等改动先进入隔离测试，只有通过后才更新本 fork 和网站。
+涉及数据格式、本地存储、备份、联网、依赖、测试或发布配置的变化，以及合并冲突，都会停止自动发布，等待维护者检查。
+
+发布前运行前端回归测试，并在 Chromium 和 WebKit 中用合成旧数据验证升级、离线重开、JSON/ZIP 备份恢复、浏览器隔离和程序回退。
+测试与发布权限分开，发布的是同一次运行中已测试的构建；发布失败会尝试恢复上一版网页，自动合并的源码会增加回退提交并暂停后续自动更新。
+网站地址和本地保存方式保持不变。测试不能保证覆盖所有情况，手机里的重要记录仍请定期导出备份；程序回退不能恢复被用户清除的数据。
+
+运行结果与需要人工处理的原因见 [GitHub Actions](https://github.com/Wu-Zzz/opengym-local/actions/workflows/pages.yml)。失败通知取决于你的 GitHub 通知设置。
+每月检查记录保存在独立 `maintenance-checks` 分支，用于记录云端任务活动；不会修改主分支或触发网页更新。
+没有使用付费运行器、AI API 或个人访问密钥，使用公开仓库的标准 GitHub 托管运行器及任务临时凭据。
+
+主分支的人工推送同样先测试再发布，但不会自动混入上游改动。详细流程见 `.github/workflows/pages.yml` 和 `scripts/maintenance/`。
+本地保存实现见 `frontend/src/lib/local-mode.js`、`frontend/src/store/useStore.local-only.test.js`。
 
 以下为上游项目文档，其中账号、服务器、手机原生版等说明不代表此部署启用了相应服务。
 
